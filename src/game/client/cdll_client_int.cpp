@@ -150,6 +150,12 @@
 
 #endif
 
+#include "mem.h"
+#include "pattern.h"
+#include "module.h"
+#include "protect.h"
+
+#undef CreateEvent
 
 extern vgui::IInputInternal *g_InputInternal;
 
@@ -177,6 +183,62 @@ extern vgui::IInputInternal *g_InputInternal;
 #include "tier0/memdbgon.h"
 
 extern IClientMode *GetClientModeNormal();
+
+
+// HACKHACK2025:	Until VPhysics fixes its save/restore functionality, this has to be done to
+//					restore it to a functional state
+static void PatchVphysicsSaveRestore()
+{
+	mem::module vphysics_module = mem::module::named("vphysics.dll");
+
+	// VPHYSPTR Save/Restore operations
+	mem::pointer ptr_VphysPtr_Save = mem::scan(mem::pattern("48 8b 06 41 b8 01 00 00 00 48 8b d3 48 8b ce ff 50 68"), vphysics_module);
+	mem::pointer ptr_VphysPtr_Restore = mem::scan(mem::pattern("49 8b 06 45 33 c9 48 8b d6 49 8b ce 45 8d 41 01 ff 50 78 0f b7 1d ce c8 0e 00"), vphysics_module);
+
+	// VPHYSPTR_UTLVECTOR Save/Restore operations
+	mem::pointer ptr_VphysPtrVector_Save = mem::scan(mem::pattern("48 8b 06 41 b8 01 00 00 00 4c 8b 0f 48 8b cf 48 8d 14 98 41 ff 51 68 ff c3 3b 5c 24 38 7c e1"), vphysics_module);
+	mem::pointer ptr_VphysPtrVector_Restore = mem::scan(mem::pattern("49 8b 07 45 33 c9 48 8b cd 4c 8d 34 b0 48 8b 45 00 45 8d 41 01 49 8b d6 ff 50 78"), vphysics_module);
+
+
+	// PhysicsEnvironment Save/Restore
+	mem::pointer ptr_VPhysEnv_Save = mem::scan(mem::pattern("41 b8 01 00 00 00 48 83 c2 08 48 89 5c 24 30 48 8b 01 ff 50 68"), vphysics_module);
+	mem::pointer ptr_VPhysEnv_Restore = mem::scan(mem::pattern("48 8b 0a 45 33 c9 48 8d 54 24 38 48 8b 01 45 8d 41 01 ff 50 78"), vphysics_module);
+
+
+	// In 32-bit apps, an integer and pointer are same size, but in 64-bit a
+	// pointer is twice larger than an integer. 
+	// Patching all calls to CSave::WriteInt/CRestore::ReadInt to read 2 integers to
+	// match pointer size.
+	// This also means that saves made before the patch are incompatible.
+	{
+		mem::protect writeGuard({ ptr_VphysPtr_Save, 16 });
+		(ptr_VphysPtr_Save.as<byte*>()[5]) = 0x02;
+	}
+	{
+		mem::protect writeGuard({ ptr_VphysPtr_Restore, 16 });
+		(ptr_VphysPtr_Restore.as<byte*>()[15]) = 0x02;
+	}
+
+	{
+		mem::protect writeGuard({ ptr_VphysPtrVector_Save, 24 });
+		(ptr_VphysPtrVector_Save.as<byte*>()[18]) = 0xd8; // increment vector by 8 bytes instead of 4
+		(ptr_VphysPtrVector_Save.as<byte*>()[5]) = 0x02;
+	}
+	{
+		mem::protect writeGuard({ ptr_VphysPtrVector_Restore, 24 });
+		(ptr_VphysPtrVector_Restore.as<byte*>()[12]) = 0xF0; // increment vector by 8 bytes instead of 4
+		(ptr_VphysPtrVector_Restore.as<byte*>()[20]) = 0x02;
+	}
+
+	{
+		mem::protect writeGuard({ ptr_VPhysEnv_Save, 16 });
+		(ptr_VPhysEnv_Save.as<byte*>()[2]) = 0x02;
+	}
+	{
+		mem::protect writeGuard({ ptr_VPhysEnv_Restore, 24 });
+		(ptr_VPhysEnv_Restore.as<byte*>()[17]) = 0x02;
+	}
+}
 
 // IF YOU ADD AN INTERFACE, EXTERN IT IN THE HEADER FILE.
 IVEngineClient	*engine = NULL;
@@ -1115,6 +1177,8 @@ int CHLClient::Init( CreateInterfaceFn appSystemFactory, CreateInterfaceFn physi
 	{
 		RegisterSecureLaunchProcessFunc( pfnUnsafeCmdLineProcessor );
 	}
+
+	PatchVphysicsSaveRestore();
 
 	return true;
 }
