@@ -199,44 +199,93 @@ static void PatchVphysicsSaveRestore()
 	mem::pointer ptr_VphysPtrVector_Save = mem::scan(mem::pattern("48 8b 06 41 b8 01 00 00 00 4c 8b 0f 48 8b cf 48 8d 14 98 41 ff 51 68 ff c3 3b 5c 24 38 7c e1"), vphysics_module);
 	mem::pointer ptr_VphysPtrVector_Restore = mem::scan(mem::pattern("49 8b 07 45 33 c9 48 8b cd 4c 8d 34 b0 48 8b 45 00 45 8d 41 01 49 8b d6 ff 50 78"), vphysics_module);
 
-
 	// PhysicsEnvironment Save/Restore
 	mem::pointer ptr_VPhysEnv_Save = mem::scan(mem::pattern("41 b8 01 00 00 00 48 83 c2 08 48 89 5c 24 30 48 8b 01 ff 50 68"), vphysics_module);
 	mem::pointer ptr_VPhysEnv_Restore = mem::scan(mem::pattern("48 8b 0a 45 33 c9 48 8d 54 24 38 48 8b 01 45 8d 41 01 ff 50 78"), vphysics_module);
-
 
 	// In 32-bit apps, an integer and pointer are same size, but in 64-bit a
 	// pointer is twice larger than an integer. 
 	// Patching all calls to CSave::WriteInt/CRestore::ReadInt to read 2 integers to
 	// match pointer size.
 	// This also means that saves made before the patch are incompatible.
+	if(ptr_VphysPtr_Save)
 	{
 		mem::protect writeGuard({ ptr_VphysPtr_Save, 16 });
 		(ptr_VphysPtr_Save.as<byte*>()[5]) = 0x02;
 	}
+	if (ptr_VphysPtr_Restore)
 	{
 		mem::protect writeGuard({ ptr_VphysPtr_Restore, 16 });
 		(ptr_VphysPtr_Restore.as<byte*>()[15]) = 0x02;
 	}
 
+	if (ptr_VphysPtrVector_Save)
 	{
 		mem::protect writeGuard({ ptr_VphysPtrVector_Save, 24 });
 		(ptr_VphysPtrVector_Save.as<byte*>()[18]) = 0xd8; // increment vector by 8 bytes instead of 4
 		(ptr_VphysPtrVector_Save.as<byte*>()[5]) = 0x02;
 	}
+	if (ptr_VphysPtrVector_Restore)
 	{
 		mem::protect writeGuard({ ptr_VphysPtrVector_Restore, 24 });
 		(ptr_VphysPtrVector_Restore.as<byte*>()[12]) = 0xF0; // increment vector by 8 bytes instead of 4
 		(ptr_VphysPtrVector_Restore.as<byte*>()[20]) = 0x02;
 	}
 
+	if (ptr_VPhysEnv_Save)
 	{
 		mem::protect writeGuard({ ptr_VPhysEnv_Save, 16 });
 		(ptr_VPhysEnv_Save.as<byte*>()[2]) = 0x02;
 	}
+	if (ptr_VPhysEnv_Restore)
 	{
 		mem::protect writeGuard({ ptr_VPhysEnv_Restore, 24 });
 		(ptr_VPhysEnv_Restore.as<byte*>()[17]) = 0x02;
+	}
+}
+
+static void PatchLocalBackdoor()
+{
+	mem::module executable_engine = mem::module::named("engine.dll");
+
+	mem::pointer ptr_CBaseServer__Clear_signon = mem::scan(mem::pattern("75 4A 48 8B 07"), executable_engine);
+	mem::pointer ptr_LocalTransfer_TransferEntity = mem::scan(mem::pattern("48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? B8"), executable_engine);
+	mem::pointer ptr_SV_ActivateServer_Steam = mem::scan(mem::pattern("7E 6D E8 ?? ?? ?? ?? "), executable_engine);
+	if (ptr_CBaseServer__Clear_signon && ptr_LocalTransfer_TransferEntity && ptr_SV_ActivateServer_Steam)
+	{
+		// use MP buffer size
+		// jnz -> jmp
+		{
+			mem::protect write({ ptr_CBaseServer__Clear_signon, 1 });
+			*ptr_CBaseServer__Clear_signon.as<byte*>() = 0xEB;
+		}
+
+		// fix signed 32bit comparison
+		// mov r10d, 0FFFFFFFFh
+		// ->
+		// xor r10, r10
+		// not r10
+		{
+			mem::region rgn_LocalTransfer_TransferEntity = { ptr_LocalTransfer_TransferEntity, 0x4A2 };
+			std::vector< mem::pointer > vec_Sequences = mem::scan_all(mem::pattern("41 BA FF FF FF FF"), rgn_LocalTransfer_TransferEntity);
+
+			if (vec_Sequences.size() == 5)
+			{
+				byte payload[] = { 0x4d, 0x31, 0xd2, 0x49, 0xf7, 0xd2 };
+				for (mem::pointer ptr : vec_Sequences)
+				{
+					mem::protect write({ ptr, sizeof(payload) });
+					memcpy(ptr.as<void*>(), payload, sizeof(payload));
+				}
+			}
+		}
+
+		// keep steam connected in singleplayer for GC
+		{
+			// jle -> nop
+			mem::protect write({ ptr_SV_ActivateServer_Steam, 2 });
+			write.fill(0x90);
+		}
 	}
 }
 
@@ -1179,6 +1228,7 @@ int CHLClient::Init( CreateInterfaceFn appSystemFactory, CreateInterfaceFn physi
 	}
 
 	PatchVphysicsSaveRestore();
+	PatchLocalBackdoor();
 
 	return true;
 }
